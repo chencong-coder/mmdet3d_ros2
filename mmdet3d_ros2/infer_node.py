@@ -146,6 +146,13 @@ class InferNode(Node):
 
         self.get_logger().info('full_config_file: "%s"' % config_file_path)
         self.get_logger().info('checkpoint_file: "%s"' % checkpoint_file_path)
+        if infer_device.startswith('cuda') and not torch.cuda.is_available():
+            self.logger.error(
+                'Requested infer_device "%s", but torch CUDA is not available. '
+                'Falling back to CPU to avoid crashing during model initialization.' %
+                infer_device)
+            infer_device = 'cpu'
+        self.torch_device = torch.device(infer_device)
         self.model = init_model(config_file_path, checkpoint_file_path, device=infer_device)
 
         self.subscription = self.create_subscription(
@@ -160,10 +167,10 @@ class InferNode(Node):
         # for nms and publish
         self.timer = self.create_timer(nms_interval, self.detections_callback)
 
-        self.filtered_bboxes_nms = torch.zeros(0, 6).cuda()
-        self.filtered_bboxes_tensor = torch.zeros(0, 7).cuda()
-        self.filtered_scores = torch.zeros(0).cuda()
-        self.filtered_labels = torch.zeros(0).cuda()
+        self.filtered_bboxes_nms = torch.zeros(0, 6, device=self.torch_device)
+        self.filtered_bboxes_tensor = torch.zeros(0, 7, device=self.torch_device)
+        self.filtered_scores = torch.zeros(0, device=self.torch_device)
+        self.filtered_labels = torch.zeros(0, device=self.torch_device)
 
 
     def listener_callback(self, msg):
@@ -244,7 +251,8 @@ class InferNode(Node):
                                                filtered_bboxes_y1, filtered_bboxes_z1), dim=1)
             self.filtered_bboxes_nms = torch.cat((self.filtered_bboxes_nms, filtered_bboxes_nms), dim=0)
             if self.filtered_bboxes_tensor.shape[1] != filtered_bboxes.tensor.shape[1]:
-                self.filtered_bboxes_tensor = torch.zeros(0, filtered_bboxes.tensor.shape[1]).cuda()
+                self.filtered_bboxes_tensor = torch.zeros(
+                    0, filtered_bboxes.tensor.shape[1], device=self.torch_device)
             self.filtered_bboxes_tensor = torch.cat((self.filtered_bboxes_tensor, filtered_bboxes.tensor), dim=0)
             self.filtered_scores = torch.cat((self.filtered_scores, filtered_scores), dim=0)
             self.filtered_labels = torch.cat((self.filtered_labels, filtered_labels), dim=0)
@@ -271,10 +279,10 @@ class InferNode(Node):
 
         # Clear buffers after publishing so the next timer tick reflects new frames only.
         bbox_dim = self.filtered_bboxes_tensor.shape[1]
-        self.filtered_bboxes_nms = torch.zeros(0, 6).cuda()
-        self.filtered_bboxes_tensor = torch.zeros(0, bbox_dim).cuda()
-        self.filtered_scores = torch.zeros(0).cuda()
-        self.filtered_labels = torch.zeros(0).cuda()
+        self.filtered_bboxes_nms = torch.zeros(0, 6, device=self.torch_device)
+        self.filtered_bboxes_tensor = torch.zeros(0, bbox_dim, device=self.torch_device)
+        self.filtered_scores = torch.zeros(0, device=self.torch_device)
+        self.filtered_labels = torch.zeros(0, device=self.torch_device)
 
     
     def draw_bbox(self, bboxes, labels, scores, timestamp=None):

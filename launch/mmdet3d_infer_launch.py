@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
     return LaunchDescription([
         Node(
@@ -8,13 +9,14 @@ def generate_launch_description():
             executable='infer_node',
             name='mmdet3d_infer_node',
             parameters=[
-                {'config_file': '/home/chenx2/mmdetection3d/projects/TR3D/configs/tr3d_1xb16_sunrgbd-3d-10class.py'},
-                {'checkpoint_file': '/home/chenx2/checkpoints/tr3d_1xb16_sunrgbd-3d-10class.pth'},
-                {'score_threshold': 0.98},
+                {'config_file': '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py'},
+                {'checkpoint_file': '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth'},
+                {'score_threshold': 0.30},
                 {'infer_device': 'cuda:0'},
                 {'nms_interval': 0.5},
+                {'point_cloud_frame': 'rslidar'},
                 {'point_cloud_qos': 'best_effort'},
-                {'point_cloud_topic': '/femto_mega/depth_registered/filter_points'}
+                {'point_cloud_topic': 'rslidar_points'}
             ]
         )
     ])

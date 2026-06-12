@@ -1,5 +1,14 @@
 import sys
 import types
+import faulthandler
+import os
+import time
+
+faulthandler.enable(all_threads=True)
+
+
+def startup_trace(message):
+    print(f'[infer_node_startup] {message}', file=sys.stderr, flush=True)
 
 # Mock mmengine's imports that rely on FSDP and ZeroRedundancyOptimizer
 z = types.ModuleType("mmengine.optim.optimizer.zero_optimizer")
@@ -35,11 +44,6 @@ if not hasattr(dist, "ReduceOp"):
 
 if not hasattr(dist, "_remote_device"):
     dist._remote_device = str
-    
-
-
-import time
-
 import numpy as np
 import torch
 import mmcv
@@ -58,6 +62,7 @@ import tf_transformations
 from mmdet3d.apis import inference_detector, init_model
 from mmdet3d.models.layers import aligned_3d_nms
 from visualization_msgs.msg import Marker, MarkerArray
+
 
 def transform_point(trans, pt):
     # https://answers.ros.org/question/249433/tf2_ros-buffer-transform-pointstamped/
@@ -79,13 +84,16 @@ def transform_point(trans, pt):
     return pt_in_map
 
 class InferNode(Node):
-    def __init__(self):
+    def __init__(self, preloaded_model=None, preloaded_config=None,
+                 preloaded_checkpoint=None, preloaded_device=None):
+        startup_trace('InferNode.__init__ begin')
         super().__init__('infer_node')
+        startup_trace('Node base initialized')
         self.logger = self.get_logger()
 
-        cache_time = Duration(seconds=2.0) 
-        self.tf_buffer = tf2_ros.Buffer(cache_time)
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_buffer = None
+        self.tf_listener = None
+        startup_trace('TF listener skipped; inference uses point cloud frame directly')
 
         self.declare_parameter('config_file', 'projects/TR3D/configs/tr3d_1xb16_sunrgbd-3d-10class.py')
         self.declare_parameter('checkpoint_file', '../checkpoints/tr3d_1xb16_sunrgbd-3d-10class.pth')
@@ -93,8 +101,11 @@ class InferNode(Node):
         self.declare_parameter('point_cloud_topic', '/femto_mega/depth_registered/filter_points')
         self.declare_parameter('score_threshold', 0.98)
         self.declare_parameter('infer_device', 'cuda:0')
+        self.declare_parameter('allow_cpu_fallback', False)
+        self.declare_parameter('init_device', 'cpu')
         self.declare_parameter('nms_interval', 0.5)
         self.declare_parameter('point_cloud_qos', 'best_effort')
+        startup_trace('Parameters declared')
         # self.declare_parameter('config_file', 'configs/votenet/votenet_8xb16_sunrgbd-3d.py')
         # self.declare_parameter('checkpoint_file', '../checkpoints/votenet_16x8_sunrgbd-3d-10class_20210820_162823-bf11f014.pth')
         # imvoxelnet
@@ -104,11 +115,16 @@ class InferNode(Node):
         config_file_path = self.get_parameter('config_file').get_parameter_value().string_value
         checkpoint_file_path = self.get_parameter('checkpoint_file').get_parameter_value().string_value
         infer_device = self.get_parameter('infer_device').get_parameter_value().string_value
+        init_device = self.get_parameter('init_device').get_parameter_value().string_value
+        allow_cpu_fallback = self.get_parameter('allow_cpu_fallback').get_parameter_value().bool_value
         self.score_thrs = self.get_parameter('score_threshold').get_parameter_value().double_value
         nms_interval = self.get_parameter('nms_interval').get_parameter_value().double_value
         self.point_cloud_frame = self.get_parameter('point_cloud_frame').get_parameter_value().string_value
         point_cloud_qos = self.get_parameter('point_cloud_qos').get_parameter_value().string_value
         point_cloud_topic = self.get_parameter('point_cloud_topic').get_parameter_value().string_value
+        startup_trace(
+            f'Parameters loaded: config={config_file_path}, checkpoint={checkpoint_file_path}, '
+            f'init_device={init_device}, device={infer_device}, topic={point_cloud_topic}')
 
         qos = QoSProfile(depth=5)
         if point_cloud_qos == 'best_effort':
@@ -146,31 +162,58 @@ class InferNode(Node):
 
         self.get_logger().info('full_config_file: "%s"' % config_file_path)
         self.get_logger().info('checkpoint_file: "%s"' % checkpoint_file_path)
-        if infer_device.startswith('cuda') and not torch.cuda.is_available():
-            self.logger.error(
-                'Requested infer_device "%s", but torch CUDA is not available. '
-                'Falling back to CPU to avoid crashing during model initialization.' %
-                infer_device)
-            infer_device = 'cpu'
+        startup_trace(f'torch={torch.__version__}, torch_cuda_version={torch.version.cuda}')
+        if infer_device.startswith('cuda'):
+            startup_trace('CUDA availability check is skipped during startup to avoid Jetson runtime crashes')
+        elif infer_device == 'cpu':
+            startup_trace('Using CPU by request; MMDetection3D warns some CPU paths are unsupported')
         self.torch_device = torch.device(infer_device)
-        self.model = init_model(config_file_path, checkpoint_file_path, device=infer_device)
-
-        self.subscription = self.create_subscription(
-            PointCloud2,
-            point_cloud_topic,
-            self.listener_callback,
-            qos)
-        self.marker_pub = self.create_publisher(Detection3DArray, '/detect_bbox3d', 10)
-        self.vis_pub = self.create_publisher(MarkerArray, '/detect_bbox3d_vis', 10)
-        # for debug
-        # self.publisher_ = self.create_publisher(PointCloud2, '/detect_bbox_infer_pcd', qos)
-        # for nms and publish
-        self.timer = self.create_timer(nms_interval, self.detections_callback)
+        if (preloaded_model is not None and
+                preloaded_config == config_file_path and
+                preloaded_checkpoint == checkpoint_file_path and
+                preloaded_device == init_device):
+            startup_trace(f'Using preloaded init_model result from device={init_device}')
+            self.model = preloaded_model
+        else:
+            startup_trace(f'Calling init_model on device={init_device}')
+            self.model = init_model(config_file_path, checkpoint_file_path, device=init_device)
+            startup_trace('init_model finished')
+        if init_device != infer_device and infer_device.startswith('cuda'):
+            startup_trace(f'Moving initialized model to device={infer_device}')
+            self.model.to(infer_device)
+            startup_trace(f'Model moved to device={infer_device}')
+        else:
+            infer_device = init_device
+            self.torch_device = torch.device(infer_device)
 
         self.filtered_bboxes_nms = torch.zeros(0, 6, device=self.torch_device)
         self.filtered_bboxes_tensor = torch.zeros(0, 7, device=self.torch_device)
         self.filtered_scores = torch.zeros(0, device=self.torch_device)
         self.filtered_labels = torch.zeros(0, device=self.torch_device)
+        startup_trace('Detection buffers initialized')
+
+        startup_trace(f'Creating point cloud subscription: topic={point_cloud_topic}')
+        self.subscription = self.create_subscription(
+            PointCloud2,
+            point_cloud_topic,
+            self.listener_callback,
+            qos)
+        startup_trace('Point cloud subscription created')
+
+        startup_trace('Creating Detection3DArray publisher: topic=/detect_bbox3d')
+        self.marker_pub = self.create_publisher(Detection3DArray, '/detect_bbox3d', 10)
+        startup_trace('Detection3DArray publisher created')
+
+        startup_trace('Creating MarkerArray publisher: topic=/detect_bbox3d_vis')
+        self.vis_pub = self.create_publisher(MarkerArray, '/detect_bbox3d_vis', 10)
+        startup_trace('MarkerArray publisher created')
+
+        # for debug
+        # self.publisher_ = self.create_publisher(PointCloud2, '/detect_bbox_infer_pcd', qos)
+        # for nms and publish
+        startup_trace(f'Creating detections timer: interval={nms_interval}')
+        self.timer = self.create_timer(nms_interval, self.detections_callback)
+        startup_trace('Detections timer created')
 
 
     def listener_callback(self, msg):
@@ -265,11 +308,14 @@ class InferNode(Node):
                 self.filtered_scores.cpu().numpy())
             return
 
-        pick_ind = aligned_3d_nms(
-            self.filtered_bboxes_nms,
-            self.filtered_scores,
-            self.filtered_labels,
-            0.25)
+        if self.torch_device.type == 'cpu':
+            pick_ind = torch.arange(self.filtered_bboxes_nms.shape[0], device=self.torch_device)
+        else:
+            pick_ind = aligned_3d_nms(
+                self.filtered_bboxes_nms,
+                self.filtered_scores,
+                self.filtered_labels,
+                0.25)
         self.logger.info("[NMS] detections {} -> {}".format(
             self.filtered_bboxes_nms.shape[0], pick_ind.shape[0]))
         self.draw_bbox(
@@ -407,8 +453,22 @@ class InferNode(Node):
             self.vis_pub.publish(marker_array)
         
 def main(args=None):
+    preloaded_model = None
+    preloaded_config = os.environ.get('MMDET3D_CONFIG_FILE')
+    preloaded_checkpoint = os.environ.get('MMDET3D_CHECKPOINT_FILE')
+    preloaded_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cpu')
+    if preloaded_config and preloaded_checkpoint:
+        startup_trace(f'Preloading model before rclpy.init on device={preloaded_device}')
+        preloaded_model = init_model(
+            preloaded_config, preloaded_checkpoint, device=preloaded_device)
+        startup_trace('Preload init_model finished')
+
     rclpy.init(args=args)
-    infer_node = InferNode()
+    infer_node = InferNode(
+        preloaded_model=preloaded_model,
+        preloaded_config=preloaded_config,
+        preloaded_checkpoint=preloaded_checkpoint,
+        preloaded_device=preloaded_device)
     rclpy.spin(infer_node)
     infer_node.destroy_node()
     rclpy.shutdown()

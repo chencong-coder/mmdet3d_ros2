@@ -3,6 +3,7 @@ import types
 import faulthandler
 import os
 import time
+import traceback
 
 faulthandler.enable(all_threads=True)
 
@@ -64,6 +65,69 @@ from mmdet3d.models.layers import aligned_3d_nms
 from visualization_msgs.msg import Marker, MarkerArray
 
 
+def _point_field(msg, name):
+    for field in msg.fields:
+        if field.name == name:
+            return field
+    return None
+
+
+def pointcloud2_to_array(msg, dataset_type):
+    x_field = _point_field(msg, 'x')
+    y_field = _point_field(msg, 'y')
+    z_field = _point_field(msg, 'z')
+    if x_field is None or y_field is None or z_field is None:
+        raise ValueError('PointCloud2 must contain x, y and z fields')
+
+    dtype = {
+        'names': ['x', 'y', 'z'],
+        'formats': ['<f4', '<f4', '<f4'],
+        'offsets': [x_field.offset, y_field.offset, z_field.offset],
+        'itemsize': msg.point_step,
+    }
+    point_count = msg.width * msg.height
+    raw = np.frombuffer(msg.data, dtype=np.dtype(dtype), count=point_count)
+
+    xyz = np.column_stack((raw['x'], raw['y'], raw['z'])).astype(np.float32, copy=False)
+    valid = np.isfinite(xyz).all(axis=1)
+    xyz = xyz[valid]
+
+    if dataset_type == 'kitti':
+        intensity_field = _point_field(msg, 'intensity')
+        if intensity_field is None:
+            intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
+        else:
+            intensity_dtype = {
+                'names': ['intensity'],
+                'formats': ['<f4'],
+                'offsets': [intensity_field.offset],
+                'itemsize': msg.point_step,
+            }
+            intensity_raw = np.frombuffer(
+                msg.data, dtype=np.dtype(intensity_dtype), count=point_count)
+            intensity = intensity_raw['intensity'][valid].astype(np.float32, copy=False).reshape(-1, 1)
+        return np.concatenate((xyz, intensity), axis=1)
+
+    if dataset_type == 'nuscenes':
+        intensity_field = _point_field(msg, 'intensity')
+        if intensity_field is None:
+            intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
+        else:
+            intensity_dtype = {
+                'names': ['intensity'],
+                'formats': ['<f4'],
+                'offsets': [intensity_field.offset],
+                'itemsize': msg.point_step,
+            }
+            intensity_raw = np.frombuffer(
+                msg.data, dtype=np.dtype(intensity_dtype), count=point_count)
+            intensity = intensity_raw['intensity'][valid].astype(np.float32, copy=False).reshape(-1, 1)
+        ring = np.zeros((xyz.shape[0], 1), dtype=np.float32)
+        return np.concatenate((xyz, intensity, ring), axis=1)
+
+    return xyz
+
+
 def transform_point(trans, pt):
     # https://answers.ros.org/question/249433/tf2_ros-buffer-transform-pointstamped/
     quat = [
@@ -95,8 +159,8 @@ class InferNode(Node):
         self.tf_listener = None
         startup_trace('TF listener skipped; inference uses point cloud frame directly')
 
-        self.declare_parameter('config_file', 'projects/TR3D/configs/tr3d_1xb16_sunrgbd-3d-10class.py')
-        self.declare_parameter('checkpoint_file', '../checkpoints/tr3d_1xb16_sunrgbd-3d-10class.pth')
+        self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py')
+        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth')
         self.declare_parameter('point_cloud_frame', 'femto_mega_color_optical_frame')
         self.declare_parameter('point_cloud_topic', '/femto_mega/depth_registered/filter_points')
         self.declare_parameter('score_threshold', 0.98)
@@ -105,6 +169,8 @@ class InferNode(Node):
         self.declare_parameter('init_device', 'cpu')
         self.declare_parameter('nms_interval', 0.5)
         self.declare_parameter('point_cloud_qos', 'best_effort')
+        self.declare_parameter('max_input_points', 40000)
+        self.declare_parameter('stale_point_cloud_timeout', 1.0)
         startup_trace('Parameters declared')
         # self.declare_parameter('config_file', 'configs/votenet/votenet_8xb16_sunrgbd-3d.py')
         # self.declare_parameter('checkpoint_file', '../checkpoints/votenet_16x8_sunrgbd-3d-10class_20210820_162823-bf11f014.pth')
@@ -122,6 +188,9 @@ class InferNode(Node):
         self.point_cloud_frame = self.get_parameter('point_cloud_frame').get_parameter_value().string_value
         point_cloud_qos = self.get_parameter('point_cloud_qos').get_parameter_value().string_value
         point_cloud_topic = self.get_parameter('point_cloud_topic').get_parameter_value().string_value
+        self.max_input_points = self.get_parameter('max_input_points').get_parameter_value().integer_value
+        self.stale_point_cloud_timeout = (
+            self.get_parameter('stale_point_cloud_timeout').get_parameter_value().double_value)
         startup_trace(
             f'Parameters loaded: config={config_file_path}, checkpoint={checkpoint_file_path}, '
             f'init_device={init_device}, device={infer_device}, topic={point_cloud_topic}')
@@ -190,6 +259,11 @@ class InferNode(Node):
         self.filtered_bboxes_tensor = torch.zeros(0, 7, device=self.torch_device)
         self.filtered_scores = torch.zeros(0, device=self.torch_device)
         self.filtered_labels = torch.zeros(0, device=self.torch_device)
+        self.inference_busy = False
+        self.received_frames = 0
+        self.log_every_n_frames = 10
+        self.last_point_cloud_time = None
+        self.stale_clear_published = False
         startup_trace('Detection buffers initialized')
 
         startup_trace(f'Creating point cloud subscription: topic={point_cloud_topic}')
@@ -217,90 +291,94 @@ class InferNode(Node):
 
 
     def listener_callback(self, msg):
+        if self.inference_busy:
+            self.logger.warn('Previous inference is still running; dropping point cloud frame')
+            return
+
+        self.inference_busy = True
         self.current_frame = msg.header.frame_id
         self.current_stamp = msg.header.stamp
-        # read points
-        gen = pc2.read_points(msg, skip_nans=True)
-        int_data = list(gen)
-        
-        # Determine point feature dimension based on dataset
-        if self.dataset_type == 'kitti':
-            infer_points = np.zeros((len(int_data), 4)) # x, y, z, intensity
-        elif self.dataset_type == 'nuscenes':
-            infer_points = np.zeros((len(int_data), 5)) # x, y, z, intensity, ring
-        else:
-            # We only provide XYZ for indoor datasets correctly here according to what MMDetection3D LoadPointsFromDict pipeline expects for SUNRGBD/ScanNet without color pipeline explicit.
-            infer_points = np.zeros((len(int_data), 3)) # x, y, z
-            
-        # We do inference directly in the point cloud's coordinate frame
-        points = np.zeros((len(int_data), 3))
-        base_points = np.zeros((len(int_data), 3))
-        transform_stamped = TransformStamped()
-        transform_stamped.header.stamp = msg.header.stamp
-        transform_stamped.header.frame_id = msg.header.frame_id
-        transform_stamped.child_frame_id = msg.header.frame_id
-        transform_stamped.transform.rotation.w = 1.0
+        self.received_frames += 1
+        self.last_point_cloud_time = time.monotonic()
+        self.stale_clear_published = False
 
-        for ind, x in enumerate(int_data):
-            points[ind] = [x[0], x[1], x[2]]
-            pt = Point()
-            pt.x, pt.y, pt.z = x[0], x[1], x[2]
-            base_pt = transform_point(transform_stamped, pt)
-            
-            if self.dataset_type == 'kitti':
-                # For KITTI/LiDAR, we expect 4 channels: x, y, z, intensity
-                intensity = x[3] if len(x) > 3 else 0.0
-                infer_points[ind] = [base_pt.x, base_pt.y, base_pt.z, intensity]
-            elif self.dataset_type == 'nuscenes':
-                # nuScenes models usually expect 5 channels: x, y, z, intensity, ring
-                intensity = x[3] if len(x) > 3 else 0.0
-                ring = 0.0 # Default ring to 0 if not provided
-                infer_points[ind] = [base_pt.x, base_pt.y, base_pt.z, intensity, ring]
-            else:
-                infer_points[ind] = [base_pt.x, base_pt.y, base_pt.z]
-                
-            base_points[ind] = [base_pt.x, base_pt.y, base_pt.z]
-        # infer_points = pc2.create_cloud_xyz32(header=msg.header, points=base_points)
-        # self.publisher_.publish(infer_points)
-        
-        # infer_points = pc2.create_cloud_xyz32(header=msg.header, points=base_points)
-        # self.publisher_.publish(infer_points)
-        start_time = time.time()  # get current time
-        # perform inference
-        model_result, data_afterprocess = inference_detector(self.model, infer_points)
-        end_time = time.time()  # get current time after inference
-        # Calculate elapsed time in milliseconds
-        elapsed_time_ms = (end_time - start_time) * 1000
-        self.logger.debug("Inference time: {:.2f} ms".format(elapsed_time_ms))
+        try:
+            infer_points = pointcloud2_to_array(msg, self.dataset_type)
+            original_point_count = infer_points.shape[0]
+            should_log = self.received_frames == 1 or self.received_frames % self.log_every_n_frames == 0
+            if should_log:
+                self.logger.info(
+                    f'[PCD] frame={self.received_frames} frame_id={msg.header.frame_id} '
+                    f'points={original_point_count}')
 
-        bboxes = model_result.pred_instances_3d.bboxes_3d
-        scores = model_result.pred_instances_3d.scores_3d
-        labels = model_result.pred_instances_3d.labels_3d
-        indices = torch.where(scores > self.score_thrs)
-        # x_center, y_center, z_center, dx, dy, dz, yaw
-        filtered_bboxes = bboxes[indices]
-        filtered_scores = scores[indices]
-        filtered_labels = labels[indices]
-        
-        if filtered_bboxes.shape[0] != 0:
-            filtered_bboxes_x0 = filtered_bboxes.center[:,0]-0.5*filtered_bboxes.dims[:,0]
-            filtered_bboxes_y0 = filtered_bboxes.center[:,1]-0.5*filtered_bboxes.dims[:,1]
-            filtered_bboxes_z0 = filtered_bboxes.center[:,2]-0.5*filtered_bboxes.dims[:,2]
-            filtered_bboxes_x1 = filtered_bboxes.center[:,0]+0.5*filtered_bboxes.dims[:,0]
-            filtered_bboxes_y1 = filtered_bboxes.center[:,1]+0.5*filtered_bboxes.dims[:,1]
-            filtered_bboxes_z1 = filtered_bboxes.center[:,2]+0.5*filtered_bboxes.dims[:,2]
-            filtered_bboxes_nms = torch.stack((filtered_bboxes_x0, filtered_bboxes_y0,
-                                               filtered_bboxes_z0, filtered_bboxes_x1,
-                                               filtered_bboxes_y1, filtered_bboxes_z1), dim=1)
-            self.filtered_bboxes_nms = torch.cat((self.filtered_bboxes_nms, filtered_bboxes_nms), dim=0)
-            if self.filtered_bboxes_tensor.shape[1] != filtered_bboxes.tensor.shape[1]:
-                self.filtered_bboxes_tensor = torch.zeros(
-                    0, filtered_bboxes.tensor.shape[1], device=self.torch_device)
-            self.filtered_bboxes_tensor = torch.cat((self.filtered_bboxes_tensor, filtered_bboxes.tensor), dim=0)
-            self.filtered_scores = torch.cat((self.filtered_scores, filtered_scores), dim=0)
-            self.filtered_labels = torch.cat((self.filtered_labels, filtered_labels), dim=0)
+            if original_point_count == 0:
+                self.logger.warn('[PCD] empty point cloud, skipping inference')
+                return
+
+            if self.max_input_points > 0 and original_point_count > self.max_input_points:
+                sample_indices = np.random.choice(
+                    original_point_count, self.max_input_points, replace=False)
+                infer_points = infer_points[sample_indices]
+                if should_log:
+                    self.logger.info(
+                        f'[PCD] downsampled points {original_point_count} -> {len(infer_points)}')
+
+            start_time = time.time()
+            if should_log:
+                self.logger.info(f'[Infer] start frame={self.received_frames} points={len(infer_points)}')
+            model_result, data_afterprocess = inference_detector(self.model, infer_points)
+            if self.torch_device.type == 'cuda':
+                torch.cuda.synchronize(self.torch_device)
+            end_time = time.time()
+            elapsed_time_ms = (end_time - start_time) * 1000
+            if should_log:
+                self.logger.info('[Infer] done frame={} time={:.2f} ms'.format(
+                    self.received_frames, elapsed_time_ms))
+
+            bboxes = model_result.pred_instances_3d.bboxes_3d
+            scores = model_result.pred_instances_3d.scores_3d
+            labels = model_result.pred_instances_3d.labels_3d
+            indices = torch.where(scores > self.score_thrs)
+            # x_center, y_center, z_center, dx, dy, dz, yaw
+            filtered_bboxes = bboxes[indices]
+            filtered_scores = scores[indices]
+            filtered_labels = labels[indices]
+            if should_log:
+                self.logger.info(
+                    f'[Infer] raw={scores.shape[0]} filtered={filtered_scores.shape[0]} '
+                    f'threshold={self.score_thrs:.2f}')
+            
+            if filtered_bboxes.shape[0] != 0:
+                filtered_bboxes_x0 = filtered_bboxes.center[:,0]-0.5*filtered_bboxes.dims[:,0]
+                filtered_bboxes_y0 = filtered_bboxes.center[:,1]-0.5*filtered_bboxes.dims[:,1]
+                filtered_bboxes_z0 = filtered_bboxes.center[:,2]-0.5*filtered_bboxes.dims[:,2]
+                filtered_bboxes_x1 = filtered_bboxes.center[:,0]+0.5*filtered_bboxes.dims[:,0]
+                filtered_bboxes_y1 = filtered_bboxes.center[:,1]+0.5*filtered_bboxes.dims[:,1]
+                filtered_bboxes_z1 = filtered_bboxes.center[:,2]+0.5*filtered_bboxes.dims[:,2]
+                filtered_bboxes_nms = torch.stack((filtered_bboxes_x0, filtered_bboxes_y0,
+                                                   filtered_bboxes_z0, filtered_bboxes_x1,
+                                                   filtered_bboxes_y1, filtered_bboxes_z1), dim=1)
+                self.filtered_bboxes_nms = torch.cat((self.filtered_bboxes_nms, filtered_bboxes_nms), dim=0)
+                if self.filtered_bboxes_tensor.shape[1] != filtered_bboxes.tensor.shape[1]:
+                    self.filtered_bboxes_tensor = torch.zeros(
+                        0, filtered_bboxes.tensor.shape[1], device=self.torch_device)
+                self.filtered_bboxes_tensor = torch.cat((self.filtered_bboxes_tensor, filtered_bboxes.tensor), dim=0)
+                self.filtered_scores = torch.cat((self.filtered_scores, filtered_scores), dim=0)
+                self.filtered_labels = torch.cat((self.filtered_labels, filtered_labels), dim=0)
+        except Exception:
+            self.logger.error('[Infer] callback failed:\n' + traceback.format_exc())
+        finally:
+            self.inference_busy = False
 
     def detections_callback(self):
+        if self.is_point_cloud_stale():
+            if not self.stale_clear_published:
+                self.logger.warn('No recent point cloud; clearing detections')
+                self.clear_detection_buffers()
+                self.publish_empty_detection(clear_markers=True)
+                self.stale_clear_published = True
+            return
+
         if self.filtered_bboxes_nms.shape[0] == 0:
             self.draw_bbox(
                 self.filtered_bboxes_tensor.cpu(),
@@ -324,12 +402,33 @@ class InferNode(Node):
             self.filtered_scores[pick_ind].cpu().numpy())
 
         # Clear buffers after publishing so the next timer tick reflects new frames only.
+        self.clear_detection_buffers()
+
+    def is_point_cloud_stale(self):
+        if self.last_point_cloud_time is None:
+            return True
+        return (time.monotonic() - self.last_point_cloud_time) > self.stale_point_cloud_timeout
+
+    def clear_detection_buffers(self):
         bbox_dim = self.filtered_bboxes_tensor.shape[1]
         self.filtered_bboxes_nms = torch.zeros(0, 6, device=self.torch_device)
         self.filtered_bboxes_tensor = torch.zeros(0, bbox_dim, device=self.torch_device)
         self.filtered_scores = torch.zeros(0, device=self.torch_device)
         self.filtered_labels = torch.zeros(0, device=self.torch_device)
 
+    def publish_empty_detection(self, clear_markers=False):
+        det3d_array = Detection3DArray()
+        det3d_array.header.frame_id = getattr(self, 'current_frame', self.point_cloud_frame)
+        if hasattr(self, 'current_stamp'):
+            det3d_array.header.stamp = self.current_stamp
+        self.marker_pub.publish(det3d_array)
+
+        if clear_markers and hasattr(self, 'vis_pub'):
+            marker_array = MarkerArray()
+            marker = Marker()
+            marker.action = Marker.DELETEALL
+            marker_array.markers.append(marker)
+            self.vis_pub.publish(marker_array)
     
     def draw_bbox(self, bboxes, labels, scores, timestamp=None):
         det3d_array = Detection3DArray()

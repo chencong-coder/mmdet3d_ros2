@@ -212,8 +212,8 @@ class InferNode(Node):
         self.tf_listener = None
         startup_trace('TF listener skipped; inference uses point cloud frame directly')
 
-        self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py')
-        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth')
+        self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/groupfree3d/groupfree3d_8x4_scannet-3d-18class-L6-O256.py')
+        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/src/mmdet3d_ros2/checkpoints/groupfree3d_8x4_scannet-3d-18class-L6-O256_20210702_145347-3499eb55.pth')
         self.declare_parameter('point_cloud_frame', 'femto_mega_color_optical_frame')
         self.declare_parameter('point_cloud_topic', '/femto_mega/depth_registered/filter_points')
         self.declare_parameter('score_threshold', 0.98)
@@ -226,7 +226,7 @@ class InferNode(Node):
         self.declare_parameter('min_input_points', 2048)
         self.declare_parameter('target_infer_ms', 100.0)
         self.declare_parameter('downsample_strategy', 'stride')
-        self.declare_parameter('use_amp', True)
+        self.declare_parameter('use_amp', False)
         self.declare_parameter('accumulate_detections', False)
         self.declare_parameter('point_cloud_range', '')
         self.declare_parameter('stale_point_cloud_timeout', 1.0)

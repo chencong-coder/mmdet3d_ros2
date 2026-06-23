@@ -1,6 +1,6 @@
 # Environment
 * ubuntu 20.04
-* ros galactic
+* ros foxy
 * mmdetection3d with commit id: fe25f7a51d36e3702f961e198894580d83c4387b
 
 

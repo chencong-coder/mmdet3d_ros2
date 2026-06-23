@@ -25,7 +25,7 @@ def generate_launch_description():
                 {'init_device': init_device},
                 {'allow_cpu_fallback': False},
                 {'max_input_points': 8192},
-                {'stale_point_cloud_timeout': 1.0},
+                {'stale_point_cloud_timeout': 3.0},
                 {'nms_interval': 0.5},
                 {'point_cloud_frame': 'rslidar'},
                 {'point_cloud_qos': 'best_effort'},

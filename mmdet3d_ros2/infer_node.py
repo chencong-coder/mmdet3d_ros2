@@ -4,6 +4,8 @@ import faulthandler
 import os
 import time
 import traceback
+import threading
+from contextlib import nullcontext
 
 faulthandler.enable(all_threads=True)
 
@@ -72,60 +74,111 @@ def _point_field(msg, name):
     return None
 
 
-def pointcloud2_to_array(msg, dataset_type):
+def _selected_indices(point_count, max_points, strategy):
+    if max_points <= 0 or point_count <= max_points:
+        return None
+    if strategy == 'random':
+        return np.random.choice(point_count, max_points, replace=False)
+    # Deterministic uniform sampling is much cheaper than random sampling and
+    # keeps latency predictable for a 10 Hz sensor stream.
+    return np.linspace(0, point_count - 1, max_points, dtype=np.int64)
+
+
+def pointcloud2_to_array(msg, dataset_type, max_points=0, downsample_strategy='stride',
+                         point_cloud_range=None):
     x_field = _point_field(msg, 'x')
     y_field = _point_field(msg, 'y')
     z_field = _point_field(msg, 'z')
     if x_field is None or y_field is None or z_field is None:
         raise ValueError('PointCloud2 must contain x, y and z fields')
 
+    endian = '>' if msg.is_bigendian else '<'
     dtype = {
         'names': ['x', 'y', 'z'],
-        'formats': ['<f4', '<f4', '<f4'],
+        'formats': [endian + 'f4', endian + 'f4', endian + 'f4'],
         'offsets': [x_field.offset, y_field.offset, z_field.offset],
         'itemsize': msg.point_step,
     }
     point_count = msg.width * msg.height
     raw = np.frombuffer(msg.data, dtype=np.dtype(dtype), count=point_count)
+    indices = _selected_indices(point_count, max_points, downsample_strategy)
 
-    xyz = np.column_stack((raw['x'], raw['y'], raw['z'])).astype(np.float32, copy=False)
-    valid = np.isfinite(xyz).all(axis=1)
-    xyz = xyz[valid]
+    x = raw['x'] if indices is None else raw['x'][indices]
+    y = raw['y'] if indices is None else raw['y'][indices]
+    z = raw['z'] if indices is None else raw['z'][indices]
+    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    if point_cloud_range is not None:
+        xmin, ymin, zmin, xmax, ymax, zmax = point_cloud_range
+        valid &= (
+            (x >= xmin) & (x <= xmax) &
+            (y >= ymin) & (y <= ymax) &
+            (z >= zmin) & (z <= zmax))
+
+    valid_count = int(valid.sum())
+    if valid_count == 0:
+        dims = 5 if dataset_type == 'nuscenes' else 4 if dataset_type == 'kitti' else 3
+        return np.empty((0, dims), dtype=np.float32), point_count
 
     if dataset_type == 'kitti':
+        points = np.empty((valid_count, 4), dtype=np.float32)
+        points[:, 0] = x[valid]
+        points[:, 1] = y[valid]
+        points[:, 2] = z[valid]
         intensity_field = _point_field(msg, 'intensity')
         if intensity_field is None:
-            intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
+            points[:, 3] = 0.0
         else:
             intensity_dtype = {
                 'names': ['intensity'],
-                'formats': ['<f4'],
+                'formats': [endian + 'f4'],
                 'offsets': [intensity_field.offset],
                 'itemsize': msg.point_step,
             }
             intensity_raw = np.frombuffer(
                 msg.data, dtype=np.dtype(intensity_dtype), count=point_count)
-            intensity = intensity_raw['intensity'][valid].astype(np.float32, copy=False).reshape(-1, 1)
-        return np.concatenate((xyz, intensity), axis=1)
+            intensity = intensity_raw['intensity'] if indices is None else intensity_raw['intensity'][indices]
+            points[:, 3] = intensity[valid]
+        return points, point_count
 
     if dataset_type == 'nuscenes':
+        points = np.empty((valid_count, 5), dtype=np.float32)
+        points[:, 0] = x[valid]
+        points[:, 1] = y[valid]
+        points[:, 2] = z[valid]
         intensity_field = _point_field(msg, 'intensity')
         if intensity_field is None:
-            intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
+            points[:, 3] = 0.0
         else:
             intensity_dtype = {
                 'names': ['intensity'],
-                'formats': ['<f4'],
+                'formats': [endian + 'f4'],
                 'offsets': [intensity_field.offset],
                 'itemsize': msg.point_step,
             }
             intensity_raw = np.frombuffer(
                 msg.data, dtype=np.dtype(intensity_dtype), count=point_count)
-            intensity = intensity_raw['intensity'][valid].astype(np.float32, copy=False).reshape(-1, 1)
-        ring = np.zeros((xyz.shape[0], 1), dtype=np.float32)
-        return np.concatenate((xyz, intensity, ring), axis=1)
+            intensity = intensity_raw['intensity'] if indices is None else intensity_raw['intensity'][indices]
+            points[:, 3] = intensity[valid]
+        points[:, 4] = 0.0
+        return points, point_count
 
-    return xyz
+    points = np.empty((valid_count, 3), dtype=np.float32)
+    points[:, 0] = x[valid]
+    points[:, 1] = y[valid]
+    points[:, 2] = z[valid]
+    return points, point_count
+
+
+def _parse_point_cloud_range(value):
+    if not value:
+        return None
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(',') if part.strip()]
+    else:
+        parts = list(value)
+    if len(parts) != 6:
+        raise ValueError('point_cloud_range must contain 6 values: xmin,ymin,zmin,xmax,ymax,zmax')
+    return tuple(float(part) for part in parts)
 
 
 def transform_point(trans, pt):
@@ -170,6 +223,12 @@ class InferNode(Node):
         self.declare_parameter('nms_interval', 0.5)
         self.declare_parameter('point_cloud_qos', 'best_effort')
         self.declare_parameter('max_input_points', 40000)
+        self.declare_parameter('min_input_points', 2048)
+        self.declare_parameter('target_infer_ms', 100.0)
+        self.declare_parameter('downsample_strategy', 'stride')
+        self.declare_parameter('use_amp', True)
+        self.declare_parameter('accumulate_detections', False)
+        self.declare_parameter('point_cloud_range', '')
         self.declare_parameter('stale_point_cloud_timeout', 1.0)
         startup_trace('Parameters declared')
         # self.declare_parameter('config_file', 'configs/votenet/votenet_8xb16_sunrgbd-3d.py')
@@ -189,6 +248,14 @@ class InferNode(Node):
         point_cloud_qos = self.get_parameter('point_cloud_qos').get_parameter_value().string_value
         point_cloud_topic = self.get_parameter('point_cloud_topic').get_parameter_value().string_value
         self.max_input_points = self.get_parameter('max_input_points').get_parameter_value().integer_value
+        self.configured_max_input_points = self.max_input_points
+        self.min_input_points = self.get_parameter('min_input_points').get_parameter_value().integer_value
+        self.target_infer_ms = self.get_parameter('target_infer_ms').get_parameter_value().double_value
+        self.downsample_strategy = self.get_parameter('downsample_strategy').get_parameter_value().string_value
+        self.use_amp = self.get_parameter('use_amp').get_parameter_value().bool_value
+        self.accumulate_detections = self.get_parameter('accumulate_detections').get_parameter_value().bool_value
+        point_cloud_range_value = self.get_parameter('point_cloud_range').get_parameter_value().string_value
+        self.point_cloud_range = _parse_point_cloud_range(point_cloud_range_value)
         self.stale_point_cloud_timeout = (
             self.get_parameter('stale_point_cloud_timeout').get_parameter_value().double_value)
         startup_trace(
@@ -254,13 +321,23 @@ class InferNode(Node):
         else:
             infer_device = init_device
             self.torch_device = torch.device(infer_device)
+        self.model.eval()
 
         self.filtered_bboxes_nms = torch.zeros(0, 6, device=self.torch_device)
         self.filtered_bboxes_tensor = torch.zeros(0, 7, device=self.torch_device)
         self.filtered_scores = torch.zeros(0, device=self.torch_device)
         self.filtered_labels = torch.zeros(0, device=self.torch_device)
+        self.detection_lock = threading.Lock()
+        self.pending_condition = threading.Condition()
+        self.pending_msg = None
+        self.shutdown_worker = False
         self.inference_busy = False
         self.received_frames = 0
+        self.processed_frames = 0
+        self.dropped_frames = 0
+        self.published_frames = 0
+        self.result_sequence = 0
+        self.last_published_result_sequence = -1
         self.log_every_n_frames = 10
         self.last_point_cloud_time = None
         self.stale_clear_published = False
@@ -289,51 +366,86 @@ class InferNode(Node):
         self.timer = self.create_timer(nms_interval, self.detections_callback)
         startup_trace('Detections timer created')
 
+        self.worker_thread = threading.Thread(target=self.inference_loop, daemon=True)
+        self.worker_thread.start()
+        startup_trace('Inference worker started')
 
     def listener_callback(self, msg):
-        if self.inference_busy:
-            self.logger.warn('Previous inference is still running; dropping point cloud frame')
-            return
-
-        self.inference_busy = True
-        self.current_frame = msg.header.frame_id
-        self.current_stamp = msg.header.stamp
         self.received_frames += 1
+        frame_index = self.received_frames
         self.last_point_cloud_time = time.monotonic()
         self.stale_clear_published = False
 
+        with self.pending_condition:
+            if self.pending_msg is not None:
+                self.dropped_frames += 1
+            self.pending_msg = (frame_index, msg)
+            self.pending_condition.notify()
+
+    def inference_loop(self):
+        while True:
+            with self.pending_condition:
+                while self.pending_msg is None and not self.shutdown_worker:
+                    self.pending_condition.wait(timeout=0.1)
+                if self.shutdown_worker:
+                    return
+                frame_index, msg = self.pending_msg
+                self.pending_msg = None
+
+            self.inference_busy = True
+            try:
+                self.process_frame(frame_index, msg)
+            except Exception:
+                self.logger.error('[Infer] worker failed:\n' + traceback.format_exc())
+            finally:
+                self.inference_busy = False
+
+    def process_frame(self, frame_index, msg):
+        current_frame = msg.header.frame_id
+        current_stamp = msg.header.stamp
+
         try:
-            infer_points = pointcloud2_to_array(msg, self.dataset_type)
-            original_point_count = infer_points.shape[0]
-            should_log = self.received_frames == 1 or self.received_frames % self.log_every_n_frames == 0
+            convert_start = time.time()
+            infer_points, original_point_count = pointcloud2_to_array(
+                msg,
+                self.dataset_type,
+                max_points=self.max_input_points,
+                downsample_strategy=self.downsample_strategy,
+                point_cloud_range=self.point_cloud_range)
+            convert_ms = (time.time() - convert_start) * 1000
+            should_log = frame_index == 1 or frame_index % self.log_every_n_frames == 0
             if should_log:
                 self.logger.info(
-                    f'[PCD] frame={self.received_frames} frame_id={msg.header.frame_id} '
-                    f'points={original_point_count}')
+                    f'[PCD] frame={frame_index} frame_id={current_frame} '
+                    f'raw={original_point_count} input={len(infer_points)} '
+                    f'convert={convert_ms:.2f} ms dropped={self.dropped_frames}')
 
-            if original_point_count == 0:
+            if len(infer_points) == 0:
                 self.logger.warn('[PCD] empty point cloud, skipping inference')
                 return
 
-            if self.max_input_points > 0 and original_point_count > self.max_input_points:
-                sample_indices = np.random.choice(
-                    original_point_count, self.max_input_points, replace=False)
-                infer_points = infer_points[sample_indices]
-                if should_log:
-                    self.logger.info(
-                        f'[PCD] downsampled points {original_point_count} -> {len(infer_points)}')
-
             start_time = time.time()
             if should_log:
-                self.logger.info(f'[Infer] start frame={self.received_frames} points={len(infer_points)}')
-            model_result, data_afterprocess = inference_detector(self.model, infer_points)
+                self.logger.info(f'[Infer] start frame={frame_index} points={len(infer_points)}')
+            amp_enabled = self.use_amp and self.torch_device.type == 'cuda'
+            amp_context = (
+                torch.cuda.amp.autocast(enabled=True)
+                if amp_enabled else nullcontext())
+            with torch.inference_mode(), amp_context:
+                model_result, data_afterprocess = inference_detector(self.model, infer_points)
             if self.torch_device.type == 'cuda':
                 torch.cuda.synchronize(self.torch_device)
             end_time = time.time()
             elapsed_time_ms = (end_time - start_time) * 1000
+            total_time_ms = convert_ms + elapsed_time_ms
+            self.processed_frames += 1
+            self.adapt_max_input_points(total_time_ms, len(infer_points))
             if should_log:
-                self.logger.info('[Infer] done frame={} time={:.2f} ms'.format(
-                    self.received_frames, elapsed_time_ms))
+                self.logger.info(
+                    '[Infer] done frame={} infer={:.2f} ms total={:.2f} ms '
+                    'target={:.1f} max_points={}'.format(
+                        frame_index, elapsed_time_ms, total_time_ms,
+                        self.target_infer_ms, self.max_input_points))
 
             bboxes = model_result.pred_instances_3d.bboxes_3d
             scores = model_result.pred_instances_3d.scores_3d
@@ -358,17 +470,49 @@ class InferNode(Node):
                 filtered_bboxes_nms = torch.stack((filtered_bboxes_x0, filtered_bboxes_y0,
                                                    filtered_bboxes_z0, filtered_bboxes_x1,
                                                    filtered_bboxes_y1, filtered_bboxes_z1), dim=1)
-                self.filtered_bboxes_nms = torch.cat((self.filtered_bboxes_nms, filtered_bboxes_nms), dim=0)
-                if self.filtered_bboxes_tensor.shape[1] != filtered_bboxes.tensor.shape[1]:
-                    self.filtered_bboxes_tensor = torch.zeros(
-                        0, filtered_bboxes.tensor.shape[1], device=self.torch_device)
-                self.filtered_bboxes_tensor = torch.cat((self.filtered_bboxes_tensor, filtered_bboxes.tensor), dim=0)
-                self.filtered_scores = torch.cat((self.filtered_scores, filtered_scores), dim=0)
-                self.filtered_labels = torch.cat((self.filtered_labels, filtered_labels), dim=0)
+                with self.detection_lock:
+                    self.current_frame = current_frame
+                    self.current_stamp = current_stamp
+                    if self.filtered_bboxes_tensor.shape[1] != filtered_bboxes.tensor.shape[1]:
+                        self.filtered_bboxes_tensor = torch.zeros(
+                            0, filtered_bboxes.tensor.shape[1], device=self.torch_device)
+                    if self.accumulate_detections:
+                        self.filtered_bboxes_nms = torch.cat(
+                            (self.filtered_bboxes_nms, filtered_bboxes_nms), dim=0)
+                        self.filtered_bboxes_tensor = torch.cat(
+                            (self.filtered_bboxes_tensor, filtered_bboxes.tensor), dim=0)
+                        self.filtered_scores = torch.cat((self.filtered_scores, filtered_scores), dim=0)
+                        self.filtered_labels = torch.cat((self.filtered_labels, filtered_labels), dim=0)
+                    else:
+                        self.filtered_bboxes_nms = filtered_bboxes_nms
+                        self.filtered_bboxes_tensor = filtered_bboxes.tensor
+                        self.filtered_scores = filtered_scores
+                        self.filtered_labels = filtered_labels
+                    self.result_sequence += 1
+            else:
+                with self.detection_lock:
+                    self.current_frame = current_frame
+                    self.current_stamp = current_stamp
+                    if not self.accumulate_detections:
+                        self.clear_detection_buffers_locked()
+                    self.result_sequence += 1
         except Exception:
             self.logger.error('[Infer] callback failed:\n' + traceback.format_exc())
-        finally:
-            self.inference_busy = False
+
+    def adapt_max_input_points(self, elapsed_time_ms, input_points):
+        if self.target_infer_ms <= 0 or self.max_input_points <= 0:
+            return
+        if elapsed_time_ms > self.target_infer_ms * 1.15 and self.max_input_points > self.min_input_points:
+            self.max_input_points = max(self.min_input_points, int(self.max_input_points * 0.85))
+            self.logger.warn(
+                f'[Infer] over target ({elapsed_time_ms:.1f} ms), reducing max_input_points to '
+                f'{self.max_input_points}')
+        elif (elapsed_time_ms < self.target_infer_ms * 0.75 and
+              input_points >= self.max_input_points and
+              self.max_input_points < self.configured_max_input_points):
+            self.max_input_points = min(
+                self.configured_max_input_points,
+                int(self.max_input_points * 1.05))
 
     def detections_callback(self):
         if self.is_point_cloud_stale():
@@ -379,30 +523,50 @@ class InferNode(Node):
                 self.stale_clear_published = True
             return
 
-        if self.filtered_bboxes_nms.shape[0] == 0:
+        with self.detection_lock:
+            result_sequence = self.result_sequence
+            filtered_bboxes_nms = self.filtered_bboxes_nms
+            filtered_bboxes_tensor = self.filtered_bboxes_tensor
+            filtered_scores = self.filtered_scores
+            filtered_labels = self.filtered_labels
+            result_frame = getattr(self, 'current_frame', 'odom')
+            result_stamp = getattr(self, 'current_stamp', None)
+            if self.accumulate_detections:
+                self.clear_detection_buffers_locked()
+
+        if (not self.accumulate_detections and
+                result_sequence == self.last_published_result_sequence):
+            return
+
+        if filtered_bboxes_nms.shape[0] == 0:
             self.draw_bbox(
-                self.filtered_bboxes_tensor.cpu(),
-                self.filtered_labels.cpu().numpy(),
-                self.filtered_scores.cpu().numpy())
+                filtered_bboxes_tensor.cpu(),
+                filtered_labels.cpu().numpy(),
+                filtered_scores.cpu().numpy(),
+                frame_id=result_frame,
+                stamp=result_stamp)
+            self.last_published_result_sequence = result_sequence
             return
 
         if self.torch_device.type == 'cpu':
-            pick_ind = torch.arange(self.filtered_bboxes_nms.shape[0], device=self.torch_device)
+            pick_ind = torch.arange(filtered_bboxes_nms.shape[0], device=self.torch_device)
         else:
             pick_ind = aligned_3d_nms(
-                self.filtered_bboxes_nms,
-                self.filtered_scores,
-                self.filtered_labels,
+                filtered_bboxes_nms,
+                filtered_scores,
+                filtered_labels,
                 0.25)
-        self.logger.info("[NMS] detections {} -> {}".format(
-            self.filtered_bboxes_nms.shape[0], pick_ind.shape[0]))
+        self.published_frames += 1
+        if self.published_frames == 1 or self.published_frames % self.log_every_n_frames == 0:
+            self.logger.info("[NMS] detections {} -> {}".format(
+                filtered_bboxes_nms.shape[0], pick_ind.shape[0]))
         self.draw_bbox(
-            self.filtered_bboxes_tensor[pick_ind].cpu(),
-            self.filtered_labels[pick_ind].cpu().numpy(),
-            self.filtered_scores[pick_ind].cpu().numpy())
-
-        # Clear buffers after publishing so the next timer tick reflects new frames only.
-        self.clear_detection_buffers()
+            filtered_bboxes_tensor[pick_ind].cpu(),
+            filtered_labels[pick_ind].cpu().numpy(),
+            filtered_scores[pick_ind].cpu().numpy(),
+            frame_id=result_frame,
+            stamp=result_stamp)
+        self.last_published_result_sequence = result_sequence
 
     def is_point_cloud_stale(self):
         if self.last_point_cloud_time is None:
@@ -410,6 +574,10 @@ class InferNode(Node):
         return (time.monotonic() - self.last_point_cloud_time) > self.stale_point_cloud_timeout
 
     def clear_detection_buffers(self):
+        with self.detection_lock:
+            self.clear_detection_buffers_locked()
+
+    def clear_detection_buffers_locked(self):
         bbox_dim = self.filtered_bboxes_tensor.shape[1]
         self.filtered_bboxes_nms = torch.zeros(0, 6, device=self.torch_device)
         self.filtered_bboxes_tensor = torch.zeros(0, bbox_dim, device=self.torch_device)
@@ -429,11 +597,21 @@ class InferNode(Node):
             marker.action = Marker.DELETEALL
             marker_array.markers.append(marker)
             self.vis_pub.publish(marker_array)
+
+    def destroy_node(self):
+        with self.pending_condition:
+            self.shutdown_worker = True
+            self.pending_condition.notify()
+        if hasattr(self, 'worker_thread') and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=1.0)
+        super().destroy_node()
     
-    def draw_bbox(self, bboxes, labels, scores, timestamp=None):
+    def draw_bbox(self, bboxes, labels, scores, frame_id=None, stamp=None):
         det3d_array = Detection3DArray()
-        det3d_array.header.frame_id = getattr(self, 'current_frame', 'odom')
-        if hasattr(self, 'current_stamp'):
+        det3d_array.header.frame_id = frame_id or getattr(self, 'current_frame', 'odom')
+        if stamp is not None:
+            det3d_array.header.stamp = stamp
+        elif hasattr(self, 'current_stamp'):
             det3d_array.header.stamp = self.current_stamp
         
         marker_array = MarkerArray()
@@ -456,8 +634,7 @@ class InferNode(Node):
 
                 det3d = Detection3D()
                 det3d.header.frame_id = det3d_array.header.frame_id
-                if hasattr(self, 'current_stamp'):
-                    det3d.header.stamp = self.current_stamp
+                det3d.header.stamp = det3d_array.header.stamp
 
                 pose = Pose()
                 pose.position.x = bbox[0].item()
@@ -496,8 +673,7 @@ class InferNode(Node):
                 # Box marker as a wireframe LINE_LIST so RViz shows an actual 3D box.
                 m = Marker()
                 m.header.frame_id = det3d_array.header.frame_id
-                if hasattr(self, 'current_stamp'):
-                    m.header.stamp = self.current_stamp
+                m.header.stamp = det3d_array.header.stamp
                 m.ns = "bboxes"
                 m.id = ind * 2
                 m.type = Marker.LINE_LIST
@@ -531,8 +707,7 @@ class InferNode(Node):
                 # Text marker (class name + score)
                 t = Marker()
                 t.header.frame_id = det3d_array.header.frame_id
-                if hasattr(self, 'current_stamp'):
-                    t.header.stamp = self.current_stamp
+                t.header.stamp = det3d_array.header.stamp
                 t.ns = "labels"
                 t.id = ind * 2 + 1
                 t.type = Marker.TEXT_VIEW_FACING

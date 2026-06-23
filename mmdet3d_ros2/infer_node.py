@@ -213,7 +213,7 @@ class InferNode(Node):
         startup_trace('TF listener skipped; inference uses point cloud frame directly')
 
         self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/groupfree3d/groupfree3d_8x4_scannet-3d-18class-L6-O256.py')
-        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/src/mmdet3d_ros2/checkpoints/groupfree3d_8x4_scannet-3d-18class-L6-O256_20210702_145347-3499eb55.pth')
+        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/groupfree3d_8x4_scannet-3d-18class-L6-O256_20210702_145347-3499eb55.pth')
         self.declare_parameter('point_cloud_frame', 'femto_mega_color_optical_frame')
         self.declare_parameter('point_cloud_topic', '/femto_mega/depth_registered/filter_points')
         self.declare_parameter('score_threshold', 0.98)

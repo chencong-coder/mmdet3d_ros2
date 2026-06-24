@@ -28,7 +28,7 @@ def generate_launch_description():
                 {'min_input_points': 512},
                 {'target_infer_ms': 100.0},
                 {'downsample_strategy': 'stride'},
-                {'use_amp': True},
+                {'use_amp': False},
                 {'accumulate_detections': False},
                 {'stale_point_cloud_timeout': 3.0},
                 {'nms_interval': 0.05},

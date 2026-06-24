@@ -226,7 +226,7 @@ class InferNode(Node):
         self.declare_parameter('min_input_points', 512)
         self.declare_parameter('target_infer_ms', 100.0)
         self.declare_parameter('downsample_strategy', 'stride')
-        self.declare_parameter('use_amp', True)
+        self.declare_parameter('use_amp', False)
         self.declare_parameter('accumulate_detections', False)
         self.declare_parameter('point_cloud_range', '')
         self.declare_parameter('stale_point_cloud_timeout', 1.0)
@@ -425,12 +425,7 @@ class InferNode(Node):
             start_time = time.time()
             if should_log:
                 self.logger.info(f'[Infer] start frame={frame_index} points={len(infer_points)}')
-            amp_enabled = self.use_amp and self.torch_device.type == 'cuda'
-            amp_context = (
-                torch.cuda.amp.autocast(enabled=True)
-                if amp_enabled else nullcontext())
-            with torch.inference_mode(), amp_context:
-                model_result, data_afterprocess = inference_detector(self.model, infer_points)
+            model_result, data_afterprocess = self.run_inference(infer_points)
             if self.torch_device.type == 'cuda':
                 torch.cuda.synchronize(self.torch_device)
             end_time = time.time()
@@ -496,6 +491,29 @@ class InferNode(Node):
                     self.result_sequence += 1
         except Exception:
             self.logger.error('[Infer] callback failed:\n' + traceback.format_exc())
+
+    def run_inference(self, infer_points):
+        amp_enabled = self.use_amp and self.torch_device.type == 'cuda'
+        try:
+            with torch.inference_mode(), self.amp_context(amp_enabled):
+                return inference_detector(self.model, infer_points)
+        except RuntimeError as exc:
+            message = str(exc)
+            if amp_enabled and 'expected scalar type Half but found Float' in message:
+                self.use_amp = False
+                self.logger.warn(
+                    '[Infer] AMP disabled because this model/op path requires FP32 '
+                    f'({message})')
+                if self.torch_device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                with torch.inference_mode():
+                    return inference_detector(self.model, infer_points)
+            raise
+
+    def amp_context(self, enabled):
+        if enabled:
+            return torch.cuda.amp.autocast(enabled=True)
+        return nullcontext()
 
     def adapt_max_input_points(self, elapsed_time_ms, input_points):
         if self.target_infer_ms <= 0 or self.max_input_points <= 0:

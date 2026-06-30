@@ -4,8 +4,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    config_file = '/home/nvidia/mmdetection3d/configs/groupfree3d/groupfree3d_head-L6-O256_4xb8_scannet-seg.py'
-    checkpoint_file = '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/groupfree3d_8x4_scannet-3d-18class-L6-O256_20210702_145347-3499eb55.pth'
+    config_file = '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py'
+    checkpoint_file = '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth'
     init_device = 'cuda:0'
 
     return LaunchDescription([
@@ -20,13 +20,13 @@ def generate_launch_description():
             parameters=[
                 {'config_file': config_file},
                 {'checkpoint_file': checkpoint_file},
-                {'score_threshold': 0.4},
+                {'score_threshold': 0.35},
                 {'infer_device': 'cuda:0'},
                 {'init_device': init_device},
                 {'allow_cpu_fallback': False},
-                {'max_input_points': 1024},
-                {'min_input_points': 512},
-                {'target_infer_ms': 100.0},
+                {'max_input_points': 2048},
+                {'min_input_points': 2048},
+                {'target_infer_ms': 300.0},
                 {'downsample_strategy': 'stride'},
                 {'use_amp': False},
                 {'accumulate_detections': False},

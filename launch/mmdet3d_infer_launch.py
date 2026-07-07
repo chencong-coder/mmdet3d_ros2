@@ -1,12 +1,18 @@
+import os
+
 from launch import LaunchDescription
 from launch.actions import SetEnvironmentVariable
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    config_file = '/home/nvidia/mmdetection3d/configs/fcaf3d/fcaf3d_2xb8_scannet-3d-18class.py'
-    checkpoint_file = '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/fcaf3d_8x2_scannet-3d-18class_20220805_084956.pth'
-    init_device = 'cuda:0'
+    config_file = os.environ.get(
+        'MMDET3D_CONFIG_FILE',
+        '/home/nvidia/mmdetection3d/configs/fcaf3d/fcaf3d_2xb8_scannet-3d-18class.py')
+    checkpoint_file = os.environ.get(
+        'MMDET3D_CHECKPOINT_FILE',
+        '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/fcaf3d_8x2_scannet-3d-18class_20220805_084956.pth')
+    init_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cuda:0')
 
     return LaunchDescription([
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),

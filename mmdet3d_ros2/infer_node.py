@@ -232,8 +232,11 @@ class InferNode(Node):
         self.declare_parameter('stale_point_cloud_timeout', 1.0)
         startup_trace('Parameters declared')
         # votenet
-        self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py,')
-        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth')
+        #self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py,')
+        #self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth')
+        # fcaf3d
+        self.declare_parameter('config_file', '/home/nvidia/mmdetection3d/configs/fcaf3d/fcaf3d_8xb4_scannet-3d.py')
+        self.declare_parameter('checkpoint_file', '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/fcaf3d_8x4_scannet-3d-18class_20210823_234503-cf8134fa.pth')
 
         config_file_path = self.get_parameter('config_file').get_parameter_value().string_value
         checkpoint_file_path = self.get_parameter('checkpoint_file').get_parameter_value().string_value

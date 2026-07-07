@@ -4,8 +4,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    config_file = '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py'
-    checkpoint_file = '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth'
+    config_file = '/home/nvidia/mmdetection3d/configs/fcaf3d/fcaf3d_2xb8_scannet-3d-18class.py'
+    checkpoint_file = '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/fcaf3d_8x2_scannet-3d-18class_20220805_084956.pth'
     init_device = 'cuda:0'
 
     return LaunchDescription([
@@ -24,8 +24,8 @@ def generate_launch_description():
                 {'infer_device': 'cuda:0'},
                 {'init_device': init_device},
                 {'allow_cpu_fallback': False},
-                {'max_input_points': 2048},
-                {'min_input_points': 2048},
+                {'max_input_points': 0},
+                {'min_input_points': 0},
                 {'target_infer_ms': 300.0},
                 {'downsample_strategy': 'stride'},
                 {'use_amp': False},

@@ -162,6 +162,17 @@ def pointcloud2_to_array(msg, dataset_type, max_points=0, downsample_strategy='s
         points[:, 4] = 0.0
         return points, point_count
 
+    if dataset_type == 'scannet':
+        # FCAF3D ScanNet expects 6 channels (xyz + rgb), pad rgb with zeros
+        points = np.empty((valid_count, 6), dtype=np.float32)
+        points[:, 0] = x[valid]
+        points[:, 1] = y[valid]
+        points[:, 2] = z[valid]
+        points[:, 3] = 0.0
+        points[:, 4] = 0.0
+        points[:, 5] = 0.0
+        return points, point_count
+
     points = np.empty((valid_count, 3), dtype=np.float32)
     points[:, 0] = x[valid]
     points[:, 1] = y[valid]

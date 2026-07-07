@@ -12,7 +12,6 @@ def generate_launch_description():
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
         SetEnvironmentVariable('MMDET3D_CONFIG_FILE', config_file),
         SetEnvironmentVariable('MMDET3D_CHECKPOINT_FILE', checkpoint_file),
-        SetEnvironmentVariable('MMDET3D_INIT_DEVICE', init_device),
         Node(
             package='mmdet3d_ros2',
             executable='infer_node',

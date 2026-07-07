@@ -1,0 +1,3 @@
+[console_scripts]
+infer_node = mmdet3d_ros2.infer_node:main
+

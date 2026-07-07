@@ -13,6 +13,26 @@ faulthandler.enable(all_threads=True)
 def startup_trace(message):
     print(f'[infer_node_startup] {message}', file=sys.stderr, flush=True)
 
+
+def init_model_with_diagnostics(config_file, checkpoint_file, device):
+    try:
+        return init_model(config_file, checkpoint_file, device=device)
+    except ImportError as exc:
+        message = str(exc)
+        config_lower = (config_file or '').lower()
+        checkpoint_lower = (checkpoint_file or '').lower()
+        if ('minkowskiengine' in message.lower() or
+                'fcaf3d' in config_lower or
+                'fcaf3d' in checkpoint_lower):
+            startup_trace(
+                'Model initialization failed because this config requires '
+                'MinkowskiEngine. Install MinkowskiEngine in the same Python '
+                'environment used by ROS 2, or switch MMDET3D_CONFIG_FILE and '
+                'MMDET3D_CHECKPOINT_FILE to a non-MinkowskiEngine model.')
+            startup_trace(f'config={config_file}')
+            startup_trace(f'checkpoint={checkpoint_file}')
+        raise
+
 # Mock mmengine's imports that rely on FSDP and ZeroRedundancyOptimizer
 z = types.ModuleType("mmengine.optim.optimizer.zero_optimizer")
 z.ZeroRedundancyOptimizer = type("ZeroRedundancyOptimizer", (), {})
@@ -324,7 +344,8 @@ class InferNode(Node):
             self.model = preloaded_model
         else:
             startup_trace(f'Calling init_model on device={init_device}')
-            self.model = init_model(config_file_path, checkpoint_file_path, device=init_device)
+            self.model = init_model_with_diagnostics(
+                config_file_path, checkpoint_file_path, device=init_device)
             startup_trace('init_model finished')
         if init_device != infer_device and infer_device.startswith('cuda'):
             startup_trace(f'Moving initialized model to device={infer_device}')
@@ -763,7 +784,7 @@ def main(args=None):
     preloaded_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cpu')
     if preloaded_config and preloaded_checkpoint:
         startup_trace(f'Preloading model before rclpy.init on device={preloaded_device}')
-        preloaded_model = init_model(
+        preloaded_model = init_model_with_diagnostics(
             preloaded_config, preloaded_checkpoint, device=preloaded_device)
         startup_trace('Preload init_model finished')
 

@@ -250,7 +250,7 @@ class InferNode(Node):
         self.declare_parameter('score_threshold', 0.98)
         self.declare_parameter('infer_device', 'cuda:0')
         self.declare_parameter('allow_cpu_fallback', False)
-        self.declare_parameter('init_device', 'cpu')
+        self.declare_parameter('init_device', 'cuda:0')
         self.declare_parameter('nms_interval', 0.5)
         self.declare_parameter('point_cloud_qos', 'best_effort')
         self.declare_parameter('max_input_points', 1024)
@@ -781,7 +781,7 @@ def main(args=None):
     preloaded_model = None
     preloaded_config = os.environ.get('MMDET3D_CONFIG_FILE')
     preloaded_checkpoint = os.environ.get('MMDET3D_CHECKPOINT_FILE')
-    preloaded_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cpu')
+    preloaded_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cuda:0')
     if preloaded_config and preloaded_checkpoint:
         startup_trace(f'Preloading model before rclpy.init on device={preloaded_device}')
         preloaded_model = init_model_with_diagnostics(

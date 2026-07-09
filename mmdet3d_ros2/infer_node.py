@@ -253,11 +253,11 @@ class InferNode(Node):
         self.declare_parameter('init_device', 'cuda:0')
         self.declare_parameter('nms_interval', 0.5)
         self.declare_parameter('point_cloud_qos', 'best_effort')
-        self.declare_parameter('max_input_points', 1024)
-        self.declare_parameter('min_input_points', 512)
-        self.declare_parameter('target_infer_ms', 100.0)
+        self.declare_parameter('max_input_points', 30000)
+        self.declare_parameter('min_input_points', 12000)
+        self.declare_parameter('target_infer_ms', 300.0)
         self.declare_parameter('downsample_strategy', 'stride')
-        self.declare_parameter('use_amp', False)
+        self.declare_parameter('use_amp', True)
         self.declare_parameter('accumulate_detections', False)
         self.declare_parameter('point_cloud_range', '')
         self.declare_parameter('stale_point_cloud_timeout', 1.0)
@@ -293,6 +293,10 @@ class InferNode(Node):
         startup_trace(
             f'Parameters loaded: config={config_file_path}, checkpoint={checkpoint_file_path}, '
             f'init_device={init_device}, device={infer_device}, topic={point_cloud_topic}')
+        startup_trace(
+            f'Runtime tuning: max_input_points={self.max_input_points}, '
+            f'min_input_points={self.min_input_points}, '
+            f'target_infer_ms={self.target_infer_ms:.1f}, use_amp={self.use_amp}')
 
         qos = QoSProfile(depth=5)
         if point_cloud_qos == 'best_effort':
@@ -544,7 +548,15 @@ class InferNode(Node):
                 return inference_detector(self.model, infer_points)
         except RuntimeError as exc:
             message = str(exc)
-            if amp_enabled and 'expected scalar type Half but found Float' in message:
+            message_lower = message.lower()
+            amp_fallback_terms = (
+                'half', 'float', 'fp16', 'autocast', 'not implemented',
+                'expected scalar type', 'scalar type')
+            should_retry_fp32 = (
+                amp_enabled and
+                'out of memory' not in message_lower and
+                any(term in message_lower for term in amp_fallback_terms))
+            if should_retry_fp32:
                 self.use_amp = False
                 self.logger.warn(
                     '[Infer] AMP disabled because this model/op path requires FP32 '

@@ -15,12 +15,12 @@ def _env_bool(name, default):
 def generate_launch_description():
     config_file = os.environ.get(
         'MMDET3D_CONFIG_FILE',
-        '/home/nvidia/mmdetection3d/configs/fcaf3d/fcaf3d_2xb8_scannet-3d-18class.py')
+        '/home/nvidia/mmdetection3d/configs/votenet/votenet_8xb8_scannet-3d.py')
     checkpoint_file = os.environ.get(
         'MMDET3D_CHECKPOINT_FILE',
-        '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/fcaf3d_8x2_scannet-3d-18class_20220805_084956.pth')
+        '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/votenet_8x8_scannet-3d-18class_20210823_234503-cf8134fa.pth')
     init_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cuda:0')
-    score_threshold = float(os.environ.get('MMDET3D_SCORE_THRESHOLD', '0.05'))
+    score_threshold = float(os.environ.get('MMDET3D_SCORE_THRESHOLD', '0.30'))
     max_input_points = int(os.environ.get('MMDET3D_MAX_INPUT_POINTS', '0'))
     min_input_points = int(os.environ.get('MMDET3D_MIN_INPUT_POINTS', '0'))
     target_infer_ms = float(os.environ.get('MMDET3D_TARGET_INFER_MS', '300.0'))

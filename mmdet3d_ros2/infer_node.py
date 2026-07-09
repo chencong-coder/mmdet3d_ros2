@@ -484,9 +484,19 @@ class InferNode(Node):
             filtered_scores = scores[indices]
             filtered_labels = labels[indices]
             if should_log:
+                if scores.numel() > 0:
+                    top_score, top_index = torch.max(scores, dim=0)
+                    top_label = int(labels[top_index].item())
+                    top_class = (
+                        self.class_names[top_label]
+                        if 0 <= top_label < len(self.class_names)
+                        else str(top_label))
+                    score_info = f' top_score={top_score.item():.3f} top_class={top_class}'
+                else:
+                    score_info = ' top_score=none'
                 self.logger.info(
                     f'[Infer] raw={scores.shape[0]} filtered={filtered_scores.shape[0]} '
-                    f'threshold={self.score_thrs:.2f}')
+                    f'threshold={self.score_thrs:.2f}{score_info}')
             
             if filtered_bboxes.shape[0] != 0:
                 filtered_bboxes_x0 = filtered_bboxes.center[:,0]-0.5*filtered_bboxes.dims[:,0]

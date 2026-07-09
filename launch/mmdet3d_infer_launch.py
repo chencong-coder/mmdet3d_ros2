@@ -13,11 +13,13 @@ def generate_launch_description():
         'MMDET3D_CHECKPOINT_FILE',
         '/home/nvidia/mm3d_ws/src/mmdet3d_ros2/checkpoints/fcaf3d_8x2_scannet-3d-18class_20220805_084956.pth')
     init_device = os.environ.get('MMDET3D_INIT_DEVICE', 'cuda:0')
+    score_threshold = float(os.environ.get('MMDET3D_SCORE_THRESHOLD', '0.35'))
 
     return LaunchDescription([
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
         SetEnvironmentVariable('MMDET3D_CONFIG_FILE', config_file),
         SetEnvironmentVariable('MMDET3D_CHECKPOINT_FILE', checkpoint_file),
+        SetEnvironmentVariable('MMDET3D_INIT_DEVICE', init_device),
         Node(
             package='mmdet3d_ros2',
             executable='infer_node',
@@ -25,7 +27,7 @@ def generate_launch_description():
             parameters=[
                 {'config_file': config_file},
                 {'checkpoint_file': checkpoint_file},
-                {'score_threshold': 0.35},
+                {'score_threshold': score_threshold},
                 {'infer_device': 'cuda:0'},
                 {'init_device': init_device},
                 {'allow_cpu_fallback': False},

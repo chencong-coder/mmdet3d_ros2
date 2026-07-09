@@ -257,7 +257,7 @@ class InferNode(Node):
         self.declare_parameter('min_input_points', 12000)
         self.declare_parameter('target_infer_ms', 300.0)
         self.declare_parameter('downsample_strategy', 'stride')
-        self.declare_parameter('use_amp', True)
+        self.declare_parameter('use_amp', False)
         self.declare_parameter('accumulate_detections', False)
         self.declare_parameter('point_cloud_range', '')
         self.declare_parameter('stale_point_cloud_timeout', 1.0)
@@ -546,12 +546,13 @@ class InferNode(Node):
         try:
             with torch.inference_mode(), self.amp_context(amp_enabled):
                 return inference_detector(self.model, infer_points)
-        except RuntimeError as exc:
+        except (RuntimeError, AssertionError) as exc:
             message = str(exc)
             message_lower = message.lower()
             amp_fallback_terms = (
                 'half', 'float', 'fp16', 'autocast', 'not implemented',
-                'expected scalar type', 'scalar type')
+                'expected scalar type', 'scalar type', 'dtype',
+                'query_coordinates')
             should_retry_fp32 = (
                 amp_enabled and
                 'out of memory' not in message_lower and

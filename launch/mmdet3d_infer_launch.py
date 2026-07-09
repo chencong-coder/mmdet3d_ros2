@@ -24,7 +24,7 @@ def generate_launch_description():
     max_input_points = int(os.environ.get('MMDET3D_MAX_INPUT_POINTS', '30000'))
     min_input_points = int(os.environ.get('MMDET3D_MIN_INPUT_POINTS', '12000'))
     target_infer_ms = float(os.environ.get('MMDET3D_TARGET_INFER_MS', '300.0'))
-    use_amp = _env_bool('MMDET3D_USE_AMP', True)
+    use_amp = _env_bool('MMDET3D_USE_AMP', False)
     point_cloud_range = os.environ.get('MMDET3D_POINT_CLOUD_RANGE', '')
 
     return LaunchDescription([

@@ -104,8 +104,8 @@ def _selected_indices(point_count, max_points, strategy):
     return np.linspace(0, point_count - 1, max_points, dtype=np.int64)
 
 
-def pointcloud2_to_array(msg, dataset_type, max_points=0, downsample_strategy='stride',
-                         point_cloud_range=None):
+def pointcloud2_to_array(msg, dataset_type, model_family='unknown', max_points=0,
+                         downsample_strategy='stride', point_cloud_range=None):
     x_field = _point_field(msg, 'x')
     y_field = _point_field(msg, 'y')
     z_field = _point_field(msg, 'z')
@@ -182,7 +182,7 @@ def pointcloud2_to_array(msg, dataset_type, max_points=0, downsample_strategy='s
         points[:, 4] = 0.0
         return points, point_count
 
-    if dataset_type == 'scannet':
+    if dataset_type == 'scannet' and model_family == 'fcaf3d':
         # FCAF3D ScanNet expects 6 channels (xyz + rgb), pad rgb with zeros
         points = np.empty((valid_count, 6), dtype=np.float32)
         points[:, 0] = x[valid]
@@ -191,6 +191,16 @@ def pointcloud2_to_array(msg, dataset_type, max_points=0, downsample_strategy='s
         points[:, 3] = 0.0
         points[:, 4] = 0.0
         points[:, 5] = 0.0
+        return points, point_count
+
+    if dataset_type == 'scannet':
+        # VoteNet ScanNet configs expect xyz here; the MMDetection3D pipeline
+        # adds the height feature itself. Passing xyzrgb would create 7
+        # channels and break PointNet++'s first layer.
+        points = np.empty((valid_count, 3), dtype=np.float32)
+        points[:, 0] = x[valid]
+        points[:, 1] = y[valid]
+        points[:, 2] = z[valid]
         return points, point_count
 
     points = np.empty((valid_count, 3), dtype=np.float32)
@@ -310,6 +320,13 @@ class InferNode(Node):
         self.transform_stamped = TransformStamped()
         self.det3d_array = Detection3DArray()
         self.det3d_array.header.frame_id = getattr(self, 'current_frame', 'odom')
+        model_path_text = f'{config_file_path} {checkpoint_file_path}'.lower()
+        if 'fcaf3d' in model_path_text:
+            self.model_family = 'fcaf3d'
+        elif 'votenet' in model_path_text:
+            self.model_family = 'votenet'
+        else:
+            self.model_family = 'unknown'
 
         if 'sunrgbd' in checkpoint_file_path:
             self.dataset_type = 'sunrgbd'
@@ -334,6 +351,7 @@ class InferNode(Node):
 
         self.get_logger().info('full_config_file: "%s"' % config_file_path)
         self.get_logger().info('checkpoint_file: "%s"' % checkpoint_file_path)
+        startup_trace(f'Model family={self.model_family}, dataset={self.dataset_type}')
         startup_trace(f'torch={torch.__version__}, torch_cuda_version={torch.version.cuda}')
         if infer_device.startswith('cuda'):
             startup_trace('CUDA availability check is skipped during startup to avoid Jetson runtime crashes')
@@ -446,6 +464,7 @@ class InferNode(Node):
             infer_points, original_point_count = pointcloud2_to_array(
                 msg,
                 self.dataset_type,
+                model_family=self.model_family,
                 max_points=self.max_input_points,
                 downsample_strategy=self.downsample_strategy,
                 point_cloud_range=self.point_cloud_range)

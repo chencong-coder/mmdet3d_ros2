@@ -22,7 +22,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            "infer_node = mmdet3d_ros2.infer_node:main"
+            "infer_node = mmdet3d_ros2.infer_node:main",
+            "detect_bbox3d_socket_bridge = mmdet3d_ros2.detect_bbox3d_socket_bridge:main",
         ],
     },
 )

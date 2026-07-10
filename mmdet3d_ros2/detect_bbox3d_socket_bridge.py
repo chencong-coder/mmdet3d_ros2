@@ -82,8 +82,8 @@ class DetectBBox3DSocketBridge(Node):
         self.host = self.get_parameter('host').get_parameter_value().string_value
         self.port = self.get_parameter('port').get_parameter_value().integer_value
 
-        self.clients = []
-        self.clients_lock = threading.Lock()
+        self.socket_clients = []
+        self.socket_clients_lock = threading.Lock()
         self.shutdown_event = threading.Event()
 
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -114,8 +114,8 @@ class DetectBBox3DSocketBridge(Node):
                 return
 
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            with self.clients_lock:
-                self.clients.append(client)
+            with self.socket_clients_lock:
+                self.socket_clients.append(client)
             self.get_logger().info(f'socket client connected: {address}')
 
     def _detection_callback(self, msg):
@@ -135,8 +135,8 @@ class DetectBBox3DSocketBridge(Node):
         self._send_to_clients(data)
 
     def _send_to_clients(self, data):
-        with self.clients_lock:
-            clients = list(self.clients)
+        with self.socket_clients_lock:
+            clients = list(self.socket_clients)
 
         stale_clients = []
         for client in clients:
@@ -148,10 +148,10 @@ class DetectBBox3DSocketBridge(Node):
         if not stale_clients:
             return
 
-        with self.clients_lock:
+        with self.socket_clients_lock:
             for client in stale_clients:
-                if client in self.clients:
-                    self.clients.remove(client)
+                if client in self.socket_clients:
+                    self.socket_clients.remove(client)
                 try:
                     client.close()
                 except OSError:
@@ -163,9 +163,9 @@ class DetectBBox3DSocketBridge(Node):
             self.server_socket.close()
         except OSError:
             pass
-        with self.clients_lock:
-            clients = list(self.clients)
-            self.clients.clear()
+        with self.socket_clients_lock:
+            clients = list(self.socket_clients)
+            self.socket_clients.clear()
         for client in clients:
             try:
                 client.close()

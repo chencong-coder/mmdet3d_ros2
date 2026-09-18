@@ -26,8 +26,10 @@ def generate_launch_description():
     target_infer_ms = float(os.environ.get('MMDET3D_TARGET_INFER_MS', '300.0'))
     use_amp = _env_bool('MMDET3D_USE_AMP', False)
     point_cloud_range = os.environ.get('MMDET3D_POINT_CLOUD_RANGE', '')
+    detection_bridge = os.environ.get('DETECTION_BRIDGE', 'false').lower() in (
+        '1', 'true', 'yes', 'on')
 
-    return LaunchDescription([
+    actions = [
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
         SetEnvironmentVariable('MMDET3D_CONFIG_FILE', config_file),
         SetEnvironmentVariable('MMDET3D_CHECKPOINT_FILE', checkpoint_file),
@@ -57,4 +59,20 @@ def generate_launch_description():
                 {'point_cloud_topic': '/rslidar_points'}
             ]
         )
-    ])
+    ]
+    if detection_bridge:
+        actions.append(Node(
+            package='mmdet3d_ros2',
+            executable='detect_bbox3d_socket_bridge',
+            name='detect_bbox3d_socket_bridge',
+            parameters=[
+                {'topic': '/detect_bbox3d'},
+                {'base_frame': os.environ.get('DETECTION_BASE_FRAME', 'base_link')},
+                {'confirmation_hits': int(os.environ.get('DETECTION_CONFIRMATION_HITS', '3'))},
+                {'confirmation_window': int(os.environ.get('DETECTION_CONFIRMATION_WINDOW', '5'))},
+                {'confirmation_window_seconds': float(os.environ.get('DETECTION_CONFIRMATION_SECONDS', '1.0'))},
+                {'confirmation_distance': float(os.environ.get('DETECTION_CONFIRMATION_DISTANCE', '0.5'))},
+                {'max_missed_frames': int(os.environ.get('DETECTION_MAX_MISSED_FRAMES', '3'))},
+            ],
+        ))
+    return LaunchDescription(actions)

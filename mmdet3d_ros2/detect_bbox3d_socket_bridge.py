@@ -2,10 +2,14 @@ import json
 import math
 import socket
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
+import tf2_ros
 from vision_msgs.msg import Detection3DArray
+
+from .detection_stabilizer import DetectionStabilizer
 
 
 def _yaw_from_quaternion(q):
@@ -34,6 +38,45 @@ def _result_score(result):
     if hypothesis is not None and hasattr(hypothesis, 'score'):
         return float(hypothesis.score)
     return 0.0
+
+
+def _apply_transform(point, transform):
+    """Apply a geometry_msgs Transform to a point without extra ROS packages."""
+    translation = transform.transform.translation
+    rotation = transform.transform.rotation
+    px, py, pz = point
+    qx, qy, qz, qw = rotation.x, rotation.y, rotation.z, rotation.w
+    rx = qy * pz - qz * py
+    ry = qz * px - qx * pz
+    rz = qx * py - qy * px
+    ax, ay, az = rx + qw * px, ry + qw * py, rz + qw * pz
+    bx = qy * az - qz * ay
+    by = qz * ax - qx * az
+    bz = qx * ay - qy * ax
+    return (
+        px + 2.0 * bx + translation.x,
+        py + 2.0 * by + translation.y,
+        pz + 2.0 * bz + translation.z,
+    )
+
+
+def _relative_direction(x, y):
+    angle = math.atan2(y, x)
+    if -math.pi / 8 <= angle < math.pi / 8:
+        return '正前方'
+    if math.pi / 8 <= angle < 3 * math.pi / 8:
+        return '左前方'
+    if 3 * math.pi / 8 <= angle < 5 * math.pi / 8:
+        return '左侧'
+    if 5 * math.pi / 8 <= angle < 7 * math.pi / 8:
+        return '左后方'
+    if angle >= 7 * math.pi / 8 or angle < -7 * math.pi / 8:
+        return '正后方'
+    if -7 * math.pi / 8 <= angle < -5 * math.pi / 8:
+        return '右后方'
+    if -5 * math.pi / 8 <= angle < -3 * math.pi / 8:
+        return '右侧'
+    return '右前方'
 
 
 def _detection_to_dict(detection):
@@ -77,10 +120,32 @@ class DetectBBox3DSocketBridge(Node):
         self.declare_parameter('topic', '/detect_bbox3d')
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8765)
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('confirmation_hits', 3)
+        self.declare_parameter('confirmation_window', 5)
+        self.declare_parameter('confirmation_window_seconds', 1.0)
+        self.declare_parameter('confirmation_distance', 0.5)
+        self.declare_parameter('max_missed_frames', 3)
 
         self.topic = self.get_parameter('topic').get_parameter_value().string_value
         self.host = self.get_parameter('host').get_parameter_value().string_value
         self.port = self.get_parameter('port').get_parameter_value().integer_value
+        self.base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
+        confirmation_hits = self.get_parameter('confirmation_hits').get_parameter_value().integer_value
+        confirmation_window = self.get_parameter('confirmation_window').get_parameter_value().integer_value
+        confirmation_window_seconds = self.get_parameter('confirmation_window_seconds').get_parameter_value().double_value
+        confirmation_distance = self.get_parameter('confirmation_distance').get_parameter_value().double_value
+        max_missed_frames = self.get_parameter('max_missed_frames').get_parameter_value().integer_value
+        self.stabilizer = DetectionStabilizer(
+            min_hits=confirmation_hits,
+            window_size=confirmation_window,
+            window_seconds=confirmation_window_seconds,
+            match_distance=confirmation_distance,
+            max_missed_frames=max_missed_frames,
+        )
+        self.frame_sequence = 0
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.socket_clients = []
         self.socket_clients_lock = threading.Lock()
@@ -119,20 +184,82 @@ class DetectBBox3DSocketBridge(Node):
             self.get_logger().info(f'socket client connected: {address}')
 
     def _detection_callback(self, msg):
+        self.frame_sequence += 1
+        received_at = time.time()
+        stamp = msg.header.stamp
+        message_time = float(stamp.sec) + float(stamp.nanosec) / 1e9
+        if message_time <= 0.0:
+            message_time = received_at
+        raw_detections = [
+            _detection_to_dict(detection)
+            for detection in msg.detections
+        ]
+        raw_detections = [
+            detection for detection in raw_detections
+            if detection['class_id']
+            and detection['score'] > 0.0
+            and all(math.isfinite(detection['center'][axis])
+                    for axis in ('x', 'y', 'z'))
+        ]
+        stable_detections = self.stabilizer.update(raw_detections, message_time)
+        for detection in stable_detections:
+            self._add_relative_direction(detection, msg.header.frame_id)
+
         payload = {
             'topic': self.topic,
             'frame_id': msg.header.frame_id,
+            'base_frame': self.base_frame,
+            'stabilized': True,
+            'stabilization_state': (
+                'confirmed' if stable_detections else
+                'warming' if self.frame_sequence < self.stabilizer.min_hits else
+                'empty'
+            ),
+            'frame_sequence': self.frame_sequence,
             'stamp': {
                 'sec': int(msg.header.stamp.sec),
                 'nanosec': int(msg.header.stamp.nanosec),
             },
-            'detections': [
-                _detection_to_dict(detection)
-                for detection in msg.detections
-            ],
+            'detections': stable_detections,
         }
         data = (json.dumps(payload, separators=(',', ':')) + '\n').encode('utf-8')
         self._send_to_clients(data)
+
+    def _add_relative_direction(self, detection, source_frame):
+        source_frame = str(source_frame or '').strip().lstrip('/')
+        target_frame = self.base_frame.strip().lstrip('/')
+        if not source_frame or not target_frame:
+            detection['relative_direction'] = '方向未知'
+            return
+        try:
+            if source_frame == target_frame:
+                point = detection['center']
+            else:
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame,
+                    source_frame,
+                    rclpy.time.Time(),
+                )
+                point = dict(zip(
+                    ('x', 'y', 'z'),
+                    _apply_transform(
+                        (
+                            detection['center']['x'],
+                            detection['center']['y'],
+                            detection['center']['z'],
+                        ),
+                        transform,
+                    ),
+                ))
+            detection['relative_direction'] = _relative_direction(
+                point['x'], point['y'])
+            detection['relative_position'] = {
+                'x': point['x'], 'y': point['y'], 'z': point['z']
+            }
+        except Exception as exc:
+            detection['relative_direction'] = '方向未知'
+            self.get_logger().warning(
+                f'Cannot transform {source_frame} to {target_frame}: {exc}')
 
     def _send_to_clients(self, data):
         with self.socket_clients_lock:

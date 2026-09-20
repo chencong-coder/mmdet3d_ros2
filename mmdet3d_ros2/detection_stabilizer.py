@@ -51,10 +51,10 @@ class DetectionStabilizer:
     def __init__(
         self,
         min_hits=3,
-        window_size=5,
-        window_seconds=1.0,
+        window_size=3,
+        window_seconds=2.0,
         match_distance=0.5,
-        max_missed_frames=3,
+        max_missed_frames=5,
     ):
         if min_hits < 1 or window_size < min_hits:
             raise ValueError('window_size must be at least min_hits')

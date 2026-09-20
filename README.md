@@ -4,8 +4,9 @@
 * mmdetection3d with commit id: fe25f7a51d36e3702f961e198894580d83c4387b
 
 Detection socket output uses multi-frame confirmation by default: a target must
-be matched in at least 3 of 5 frames within 1 second before it is sent to the
-PC Agent. Same-class targets are tracked independently by spatial distance.
+be observed 3 times at a consistent position within 2 seconds before it is sent
+to the PC Agent. Short detection gaps are tolerated, and same-class targets are
+tracked independently by spatial distance.
 
 
 ## about server

@@ -24,6 +24,19 @@ def test_requires_three_consistent_frames():
     assert confirmed[0]['center']['x'] == 1.0
 
 
+def test_three_observations_can_include_short_detection_gaps():
+    stabilizer = DetectionStabilizer()
+    assert stabilizer.update([detection('chair', 1.0, 2.0)], 0.0) == []
+    assert stabilizer.update([], 0.3) == []
+    assert stabilizer.update([detection('chair', 1.1, 2.0)], 0.6) == []
+    assert stabilizer.update([], 0.9) == []
+
+    confirmed = stabilizer.update([detection('chair', 0.9, 2.0)], 1.2)
+
+    assert len(confirmed) == 1
+    assert confirmed[0]['confirmed_hits'] == 3
+
+
 def test_same_class_objects_keep_separate_tracks():
     stabilizer = DetectionStabilizer()
     for timestamp in (0.0, 0.2, 0.4):

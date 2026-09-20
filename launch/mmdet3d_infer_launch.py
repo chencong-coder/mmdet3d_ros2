@@ -69,10 +69,10 @@ def generate_launch_description():
                 {'topic': '/detect_bbox3d'},
                 {'base_frame': os.environ.get('DETECTION_BASE_FRAME', 'base_link')},
                 {'confirmation_hits': int(os.environ.get('DETECTION_CONFIRMATION_HITS', '3'))},
-                {'confirmation_window': int(os.environ.get('DETECTION_CONFIRMATION_WINDOW', '5'))},
-                {'confirmation_window_seconds': float(os.environ.get('DETECTION_CONFIRMATION_SECONDS', '1.0'))},
+                {'confirmation_window': int(os.environ.get('DETECTION_CONFIRMATION_WINDOW', '3'))},
+                {'confirmation_window_seconds': float(os.environ.get('DETECTION_CONFIRMATION_SECONDS', '2.0'))},
                 {'confirmation_distance': float(os.environ.get('DETECTION_CONFIRMATION_DISTANCE', '0.5'))},
-                {'max_missed_frames': int(os.environ.get('DETECTION_MAX_MISSED_FRAMES', '3'))},
+                {'max_missed_frames': int(os.environ.get('DETECTION_MAX_MISSED_FRAMES', '5'))},
             ],
         ))
     return LaunchDescription(actions)

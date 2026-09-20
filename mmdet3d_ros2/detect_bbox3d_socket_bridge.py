@@ -122,10 +122,10 @@ class DetectBBox3DSocketBridge(Node):
         self.declare_parameter('port', 8765)
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('confirmation_hits', 3)
-        self.declare_parameter('confirmation_window', 5)
-        self.declare_parameter('confirmation_window_seconds', 1.0)
+        self.declare_parameter('confirmation_window', 3)
+        self.declare_parameter('confirmation_window_seconds', 2.0)
         self.declare_parameter('confirmation_distance', 0.5)
-        self.declare_parameter('max_missed_frames', 3)
+        self.declare_parameter('max_missed_frames', 5)
 
         self.topic = self.get_parameter('topic').get_parameter_value().string_value
         self.host = self.get_parameter('host').get_parameter_value().string_value

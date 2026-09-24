@@ -54,3 +54,18 @@ def test_unstable_jump_does_not_confirm_same_track():
     stabilizer.update([detection('chair', 2.0, 0.0)], 0.2)
     stabilizer.update([detection('chair', 0.0, 0.0)], 0.4)
     assert stabilizer.update([detection('chair', 2.0, 0.0)], 0.6) == []
+
+
+def test_one_track_cannot_absorb_multiple_detections_from_one_frame():
+    stabilizer = DetectionStabilizer()
+    assert stabilizer.update([detection('chair', 1.0, 0.0)], 0.0) == []
+
+    confirmed = stabilizer.update([
+        detection('chair', 0.9, 0.0),
+        detection('chair', 1.0, 0.1),
+        detection('chair', 1.1, 0.0),
+    ], 0.2)
+
+    assert confirmed == []
+    assert len(stabilizer.tracks) == 3
+    assert sorted(len(track.samples) for track in stabilizer.tracks) == [1, 1, 2]

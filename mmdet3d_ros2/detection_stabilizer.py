@@ -80,11 +80,16 @@ class DetectionStabilizer:
                 if distance <= self.match_distance:
                     candidates.append((distance, track_index, detection_index))
 
+        matched_tracks = set()
         for _, track_index, detection_index in sorted(candidates):
-            if detection_index not in unmatched:
+            if (
+                track_index in matched_tracks
+                or detection_index not in unmatched
+            ):
                 continue
             track = self.tracks[track_index]
             track.add(detections[detection_index], timestamp, self.window_size)
+            matched_tracks.add(track_index)
             unmatched.remove(detection_index)
 
         for detection_index in unmatched:

@@ -10,6 +10,7 @@ import tf2_ros
 from vision_msgs.msg import Detection3DArray
 
 from .detection_stabilizer import DetectionStabilizer
+from .relative_direction import relative_direction
 
 
 def _yaw_from_quaternion(q):
@@ -61,22 +62,8 @@ def _apply_transform(point, transform):
 
 
 def _relative_direction(x, y):
-    angle = math.atan2(y, x)
-    if -math.pi / 8 <= angle < math.pi / 8:
-        return '正前方'
-    if math.pi / 8 <= angle < 3 * math.pi / 8:
-        return '左前方'
-    if 3 * math.pi / 8 <= angle < 5 * math.pi / 8:
-        return '左侧'
-    if 5 * math.pi / 8 <= angle < 7 * math.pi / 8:
-        return '左后方'
-    if angle >= 7 * math.pi / 8 or angle < -7 * math.pi / 8:
-        return '正后方'
-    if -7 * math.pi / 8 <= angle < -5 * math.pi / 8:
-        return '右后方'
-    if -5 * math.pi / 8 <= angle < -3 * math.pi / 8:
-        return '右侧'
-    return '右前方'
+    """Keep the legacy helper name for callers outside this module."""
+    return relative_direction(x, y)
 
 
 def _detection_to_dict(detection):
